@@ -1,77 +1,87 @@
-use futures::StreamExt;
+use bson::{Document, from_slice};
+use futures_util::stream::StreamExt;
 use lapin::{
-    options::*, publisher_confirm::Confirmation, types::FieldTable, BasicProperties, Connection,
-    ConnectionProperties, Result,
+    options::*, types::FieldTable, Connection, ConnectionProperties, ConsumerDelegate,
+    message::Delivery,
 };
+use serde::{Deserialize, Serialize};
+use std::{env, error::Error};
+use tokio::task;
 use tracing::info;
 
-use std::env;
+#[derive(Debug, Serialize, Deserialize)]
+struct UserMessage {
+    username: String,
+    email: String,
+}
 
-fn main() -> Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let address =
+        env::var("RABBITMQ_URL").unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5672/%2f".into());
 
-    tracing_subscriber::fmt::init();
+    let conn = Connection::connect(&address, ConnectionProperties::default())
+        .await?;
 
-    let addr = env::var("RABBITMQ_URL")
-        .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5672/%2f".into());
+    let channel = conn.create_channel().await?;
 
-    async_global_executor::block_on(async {
-        let conn = Connection::connect(
-            &addr,
-            ConnectionProperties::default(),
+    // Создаем очередь и биндим к exchange
+    let queue = channel
+        .queue_declare(
+            "user_create_queue",
+            QueueDeclareOptions::default(),
+            FieldTable::default(),
         )
         .await?;
 
-        info!("CONNECTED");
+    channel
+        .queue_bind(
+            queue.name().as_str(),
+            "user_exchange",
+            "user.new",
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await?;
 
-        let channel_a = conn.create_channel().await?;
-        let channel_b = conn.create_channel().await?;
+    let mut consumer = channel
+        .basic_consume(
+            "user_create_queue",
+            "my_consumer",
+            BasicConsumeOptions::default(),
+            FieldTable::default(),
+        )
+        .await?;
 
-        let queue = channel_a
-            .queue_declare(
-                "hello",
-                QueueDeclareOptions::default(),
-                FieldTable::default(),
-            )
-            .await?;
+    println!("Waiting for messages...");
 
-        info!(?queue, "Declared queue");
-
-        let mut consumer = channel_b
-            .basic_consume(
-                "hello",
-                "my_consumer",
-                BasicConsumeOptions::default(),
-                FieldTable::default(),
-            )
-            .await?;
-        async_global_executor::spawn(async move {
-            info!("will consume");
-            while let Some(delivery) = consumer.next().await {
-                let delivery = delivery.expect("error in consumer");
-                delivery
-                    .ack(BasicAckOptions::default())
-                    .await
-                    .expect("ack");
+    while let Some(result) = consumer.next().await {
+        match result {
+            Ok(delivery) => {
+                handle_message(delivery).await?;
             }
-        }).detach();
-
-        let payload = b"Hello world!";
-
-        loop {
-            let confirm = channel_a
-                .basic_publish(
-                    "",
-                    "hello",
-                    BasicPublishOptions::default(),
-                    payload,
-                    BasicProperties::default(),
-                )
-                .await?
-                .await?;
-            assert_eq!(confirm, Confirmation::NotRequested);
+            Err(e) => {
+                eprintln!("Error while consuming: {}", e);
+            }
         }
-    })
+    }
+
+    Ok(())
 }
+
+async fn handle_message(delivery: Delivery) -> Result<(), Box<dyn Error>> {
+    println!("Message handling...");
+    {
+        let data = &delivery.data;
+        let doc: Document = from_slice(&data)?;
+        let user: UserMessage = bson::from_document(doc)?;
+
+        info!("Received user: {:?}", user);
+    }
+
+    // подтверждаем получение
+    delivery.ack(BasicAckOptions::default()).await?;
+
+    Ok(())
+}
+
