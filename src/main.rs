@@ -14,8 +14,8 @@ fn main() -> Result<()> {
 
     tracing_subscriber::fmt::init();
 
-    let addr = env::var("AMQP_ADDR")
-        .unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
+    let addr = env::var("RABBITMQ_URL")
+        .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5672/%2f".into());
 
     async_global_executor::block_on(async {
         let conn = Connection::connect(

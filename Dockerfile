@@ -1,8 +1,14 @@
 FROM rust:1.86-alpine3.21
 
-WORKDIR /usr/src/app
+RUN apk update && apk add --no-cache \
+    musl-dev \
+    gcc \
+    libc-dev \
+    make
+
+WORKDIR /usr/src/users
 COPY . .
 
-RUN cargo install --path .
+RUN cargo build -r
 
-CMD ["users"]
+CMD ["./target/release/users"]
